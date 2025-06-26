@@ -1,0 +1,4 @@
+
+#!/bin/bash
+
+singularity shell --bind /ist:/ist --bind /pure:/pure --nv --env HF_HUB_CACHE=/pure/t1/huggingface /pure/f1/singularity/vggt.sif
