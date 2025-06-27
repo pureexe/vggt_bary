@@ -34,20 +34,20 @@
 <body>
     <div id="loading-overlay">Loading models...</div>
     <canvas id="threejs-canvas"></canvas>
-    <script src="stats.js"></script>
+
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-        let scene, camera, renderer, controls;
-        let stats; 
-        stats = new Stats();
-        document.body.appendChild(stats.dom);
-
+        let scene, camera, renderer, controls, coneMat, coneTargetMat, targetCamera, virtualCameras;
+        const sphere_size = 0.02;
+        const cone_sharp  = 0.05;
         let jsonData = []; // This will hold your input JSON data, loaded from file
         const loadedModels = []; // To store references to loaded GLB objects and their original positions
         let needsGLBUpdate = false; // Flag to control when GLB visibility/opacity needs update
+
+
 
         // --- JSON File Path ---
         // IMPORTANT: Ensure this 'data.json' file exists in the same directory as your HTML file
@@ -87,36 +87,8 @@
             });
         }
 
-        // Function to convert intrinsic and extrinsic matrices to Three.js camera setup
-        function setupCameraFromMatrices(cameraInstance, intrinsic, extrinsic, canvasWidth, canvasHeight) {
-            const fx = intrinsic[0][0];
-            const fy = intrinsic[1][1];
-            // The original cx, cy from the intrinsic matrix:
-            const cx = intrinsic[0][2];
-            const cy = intrinsic[1][2];
-
-            // To visually center the camera output, we'll effectively use the center of the canvas
-            // as the principal point for the projection matrix, ignoring the intrinsic's cx, cy for this.
-            // This means the optical axis is aligned with the center of the rendered viewport.
-            const centeredCx = canvasWidth / 2;
-            const centeredCy = canvasHeight / 2;
-
-            const near = 0.1;
-            const far = 1000;
-
-            const P = new THREE.Matrix4();
-            // Projection matrix elements are calculated using fx, fy from intrinsic
-            // but the translation terms (the last column before 0, 1) are set
-            // to center the projection on the canvas.
-            P.set(
-                2 * fx / canvasWidth,   0,                          1 - (2 * centeredCx / canvasWidth),   0,
-                0,                     (2 * fy / canvasHeight),   (2 * centeredCy / canvasHeight)  - 1,  0,
-                0,                     0,                          -(far + near) / (far - near), -(2 * far * near) / (far - near),
-                0,                     0,                          -1,                           0
-            );
-            cameraInstance.projectionMatrix.copy(P);
-            cameraInstance.projectionMatrixInverse.copy(P).invert();
-
+        // Function to extract position from extrinsic matrix (for GLB placement)
+        function getPositionFromExtrinsic(extrinsic) {
             const R_extrinsic = new THREE.Matrix3();
             R_extrinsic.set(
                 extrinsic[0][0], extrinsic[0][1], extrinsic[0][2],
@@ -126,37 +98,6 @@
 
             const t_extrinsic = new THREE.Vector3(extrinsic[0][3], extrinsic[1][3], extrinsic[2][3]);
 
-            const viewMatrix = new THREE.Matrix4();
-            // viewMatrix.set(
-            //     R_extrinsic.elements[0], R_extrinsic.elements[3], R_extrinsic.elements[6], t_extrinsic.x,
-            //     R_extrinsic.elements[1], R_extrinsic.elements[4], R_extrinsic.elements[7], t_extrinsic.y,
-            //     R_extrinsic.elements[2], R_extrinsic.elements[5], R_extrinsic.elements[8], t_extrinsic.z,
-            //     0, 0, 0, 1
-            // );
-
-            // apply negative here to convert from OpenCV to Three.js coordinate system
-            viewMatrix.set(
-                extrinsic[0][0], extrinsic[0][1], extrinsic[0][2], extrinsic[0][3],
-                -extrinsic[1][0], -extrinsic[1][1], -extrinsic[1][2], -extrinsic[1][3],
-                -extrinsic[2][0], -extrinsic[2][1], -extrinsic[2][2], -extrinsic[2][3],
-                0, 0, 0, 1
-            )
-            cameraInstance.matrixWorld.copy(viewMatrix).invert();
-            cameraInstance.matrixWorld.decompose(cameraInstance.position, cameraInstance.quaternion, cameraInstance.scale);
-            cameraInstance.updateMatrixWorld();
-        }
-
-        // Function to extract position from extrinsic matrix (for GLB placement)
-        function getPositionFromExtrinsic(extrinsic) {
-            const R_extrinsic = new THREE.Matrix3();
-            R_extrinsic.set(
-                extrinsic[0][0], extrinsic[0][1], extrinsic[0][2],
-                -extrinsic[1][0], -extrinsic[1][1], -extrinsic[1][2],
-                -extrinsic[2][0], -extrinsic[2][1], -extrinsic[2][2]
-            );
-
-            const t_extrinsic = new THREE.Vector3(extrinsic[0][3], -extrinsic[1][3], -extrinsic[2][3]);
-
             const R_transpose = new THREE.Matrix3().copy(R_extrinsic).transpose();
             const worldPosition = t_extrinsic.clone().applyMatrix3(R_transpose).negate();
             return worldPosition;
@@ -164,84 +105,11 @@
 
         // Function to update the visibility and opacity of GLB models
         function updateGLBVisibility() {
-            if (!needsGLBUpdate) return;
-            needsGLBUpdate = false;
-
-            const cameraPosition = camera.position;
-
-            // const modelsWithDistances = loadedModels.map(item => {
-            //     const distance = cameraPosition.distanceTo(item.worldPosition);
-            //     return { model: item.model, distance: distance };
-            // });
-
-            const modelsWithDistances = loadedModels.map(item => {
-                const distance = cameraPosition.distanceTo(item.modelWorldPosition);
-                return { model: item.model, distance: distance, glb_id: item.glb_id };
-            });
-
-            
-
-            modelsWithDistances.sort((a, b) => a.distance - b.distance);
-            const closestThree = modelsWithDistances.slice(0, 3);
-
-            let totalInverseDistance = 0;
-            closestThree.forEach(item => {
-                totalInverseDistance += 1 / (item.distance + 0.001);
-            });
-
-            loadedModels.forEach(item => {
-                item.model.traverse((child) => {
-                    if (child.isMesh) {
-                        child.material.opacity = 0;
-                        child.material.visible = false;
-                        child.material.needsUpdate = true;
-                    }
-                });
-            });
-
-            if(false){
-                closestThree.forEach(item => {
-                    const weight = (1 / (item.distance + 0.001)) / totalInverseDistance;
-                    item.model.traverse((child) => {
-                        if (child.isMesh) {
-                            child.material.opacity = weight;
-                            child.material.visible = true;
-                            child.material.needsUpdate = true;
-                        }
-                    });
-                });
-                write_camera_location(closestThree.map(item => item.glb_id));
-            } else{                 
-                // show only the closest model
-                closestThree.slice(0, 1).forEach(item => {
-                    const weight =  1.0;
-                    item.model.traverse((child) => {
-                        if (child.isMesh) {
-                            child.material.opacity = weight;
-                            child.material.visible = true;
-                            child.material.needsUpdate = true;
-                        }
-                    });
-                });
-                console.log("Closest model ID:", closestThree.slice(0, 1).map(item => item.glb_id));
-                write_camera_location(closestThree.slice(0, 1).map(item => item.glb_id));
-            }
+          
         }
-
-        function write_camera_location(ids){
-            localStorage.setItem('bary_address',JSON.stringify(ids));
-            localStorage.setItem('camera_location',JSON.stringify({
-                'x': camera.position.x, 
-                'y': camera.position.y,
-                'z': camera.position.z
-            }));
-        }
-
-
 
         // Initialization function
         async function init() {
-
             const canvas = document.getElementById('threejs-canvas');
             const loadingOverlay = document.getElementById('loading-overlay');
 
@@ -261,18 +129,23 @@
                 return; // Stop initialization if data fails to load
             }
 
-            window.show_model = function(model_id){
-                const firstEntry = jsonData[model_id];
-                setupCameraFromMatrices(camera, firstEntry.intrinsic, firstEntry.extrinsic, canvas.width, canvas.height);
-                controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()));
-                controls.update();
-                needsGLBUpdate = true;
-
-            }
-
             // Scene
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x333333);
+
+
+            // create material for camera 
+            coneMat = new THREE.MeshBasicMaterial( { color: 0xff0000, side: THREE.DoubleSide} );
+            coneTargetMat = new THREE.MeshBasicMaterial( { color: 0x00ff00, side: THREE.DoubleSide} );
+            let blueCamMat = new THREE.MeshBasicMaterial( { color: 0x00ffff, side: THREE.DoubleSide} );
+            const cone_geo = new THREE.ConeGeometry(sphere_size, cone_sharp);  
+            
+            virtualCameras = []
+            targetCamera = new THREE.Mesh(cone_geo, blueCamMat); 
+            targetCamera.rotation.x = -Math.PI / 2.0;
+            scene.add(targetCamera);
+
+
 
             // Camera
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -285,11 +158,7 @@
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.outputEncoding = THREE.sRGBEncoding;
 
-            // Lights - Adjusted for self-illuminating materials
-            // Ambient light provides a general brightness, but emissive materials will dominate.
-            // const ambientLight = new THREE.AmbientLight(0xffffff, 0.2); // Reduced intensity
-            // scene.add(ambientLight);
-            // Removed directional light as objects will be self-illuminating
+
 
             // GridHelper and AxesHelper for reference
             const size = 10;
@@ -320,7 +189,8 @@
 
             for (let i = 0; i < jsonData.length; i++) {
                 const data = jsonData[i];
-                const promise = loader.loadAsync(data.glb).then((gltf) => {
+                if(i == 0){
+                    const promise = loader.loadAsync(data.glb).then((gltf) => {
                     const model = gltf.scene;
                     model.name = `model_${i}`;
 
@@ -336,9 +206,7 @@
                     if(i == 0){
                         console.log("Model World Position:", modelWorldPosition);
                     }
-                    //model.position.copy(modelWorldPosition);
 
-                    //model.scale.set(0.5, 0.5, 0.5);
                     model.position.set(0, 0, 0); // Set to origin for now
 
                     // Prepare materials for direct color rendering and transparency
@@ -356,34 +224,65 @@
                     console.error(`Error loading GLB from ${data.glb}:`, error);
                 });
                 loadingPromises.push(promise);
+
+                }
+                // show camera location
+                // data.extrinsic
+                let extrinsic = data.extrinsic;
+                const w2c = new THREE.Matrix4();
+                //set is row major, internal is column major
+                w2c.set(
+                    extrinsic[0][0], extrinsic[0][1], extrinsic[0][2], extrinsic[0][3],
+                    -extrinsic[1][0], -extrinsic[1][1], -extrinsic[1][2], -extrinsic[1][3],
+                    -extrinsic[2][0], -extrinsic[2][1], -extrinsic[2][2], -extrinsic[2][3],
+                    0, 0, 0, 1
+                );
+                const cone_geo = new THREE.ConeGeometry(sphere_size, cone_sharp);  
+                const cone_mesh = new THREE.Mesh(cone_geo, coneMat); 
+                cone_mesh.rotation.x = Math.PI / 2.0;
+                const c2w = w2c.invert();
+                cone_mesh.applyMatrix4(c2w);
+                scene.add(cone_mesh);
+                virtualCameras.push(cone_mesh);
             }
 
             // Wait for all models to load
             await Promise.all(loadingPromises);
             loadingOverlay.style.display = 'none';
 
-            // --- Set initial camera state based on the first JSON entry ---
-            if (jsonData.length > 0) {
-                const firstEntry = jsonData[0];
-                setupCameraFromMatrices(camera, firstEntry.intrinsic, firstEntry.extrinsic, canvas.width, canvas.height);
-                //controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(10));
-                console.log("Camera position:", camera.position);
-                controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()));
-                controls.update();
-            } else {
-                camera.position.set(0, 5, 10);
-                camera.lookAt(0, 0, 0);
-                        controls.target.set(0, 0, -1);
-                controls.update();
-            }
 
+            controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()));
+            controls.update();
 
-            needsGLBUpdate = true;
-            updateGLBVisibility();
-
+            
             animate();
 
             window.addEventListener('resize', onWindowResize, false);
+
+            // Initial camera position
+            function onStorageChange(){
+                var camera_location = localStorage.getItem('camera_location');
+                if(camera_location != null){
+                    camera_location = JSON.parse(camera_location);
+                    targetCamera.position.x = camera_location.x;
+                    targetCamera.position.y = camera_location.y;
+                    targetCamera.position.z = camera_location.z;
+                }
+                var bary_address = localStorage.getItem('bary_address');
+                if(bary_address != null){
+                    bary_address = JSON.parse(bary_address);
+                    for(var i = 0; i < virtualCameras.length; i++){
+                        virtualCameras[i].material = coneMat;
+                    }
+                    for(var i = 0; i < bary_address.length; i++){
+                        virtualCameras[bary_address[i]].material = coneTargetMat;
+                    }
+                }
+            }
+            onStorageChange();  
+            window.addEventListener("storage", onStorageChange, false);
+
+
         }
 
         // Resize handler
@@ -393,18 +292,14 @@
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
             controls.update();
-            needsGLBUpdate = true;
-            updateGLBVisibility();
+            
         }
 
         // Animation loop
         function animate() {
-            stats.begin();
             requestAnimationFrame(animate);
             controls.update();
-            updateGLBVisibility();
             renderer.render(scene, camera);
-            stats.end();
         }
 
         window.onload = init;
