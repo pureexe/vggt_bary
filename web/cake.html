@@ -54,6 +54,100 @@
         // or provide the correct path.
         const JSON_FILE_PATH = 'cake_direct.json';
 
+        function getBarycentricWeights(p, a, b, c) {
+            // Ensure copies
+            p = p.clone();
+            a = a.clone();
+            b = b.clone();
+            c = c.clone();
+
+            // Triangle edges and normal
+            const ab = b.clone().sub(a);
+            const ac = c.clone().sub(a);
+            const normal = ab.clone().cross(ac);
+            const area2 = normal.length();
+
+            // Degenerate triangle check
+            if (area2 < 1e-10) {
+                const da = p.distanceTo(a);
+                const db = p.distanceTo(b);
+                const dc = p.distanceTo(c);
+                if (da <= db && da <= dc) return [1, 0, 0];
+                if (db <= da && db <= dc) return [0, 1, 0];
+                return [0, 0, 1];
+            }
+
+            // Project point onto triangle plane
+            normal.normalize();
+            const ap = p.clone().sub(a);
+            const distance = ap.dot(normal);
+            const projected = p.clone().sub(normal.clone().multiplyScalar(distance));
+
+            // Barycentric helper
+            function barycentric(p, a, b, c) {
+                const v0 = b.clone().sub(a);
+                const v1 = c.clone().sub(a);
+                const v2 = p.clone().sub(a);
+
+                const d00 = v0.dot(v0);
+                const d01 = v0.dot(v1);
+                const d11 = v1.dot(v1);
+                const d20 = v2.dot(v0);
+                const d21 = v2.dot(v1);
+                const denom = d00 * d11 - d01 * d01;
+
+                if (Math.abs(denom) < 1e-10) return [-1, -1, -1];
+
+                const v = (d11 * d20 - d01 * d21) / denom;
+                const w = (d00 * d21 - d01 * d20) / denom;
+                const u = 1 - v - w;
+
+                return [u, v, w];
+            }
+
+            let [u, v, w] = barycentric(projected, a, b, c);
+
+            if (u >= 0 && v >= 0 && w >= 0) {
+                return [u, v, w];
+            }
+
+            function closestPointOnSegment(p, v1, v2) {
+                const dir = v2.clone().sub(v1);
+                const t = THREE.MathUtils.clamp(p.clone().sub(v1).dot(dir) / dir.lengthSq(), 0, 1);
+                return v1.clone().add(dir.multiplyScalar(t));
+            }
+
+            const pa = closestPointOnSegment(projected, a, b);
+            const pb = closestPointOnSegment(projected, b, c);
+            const pc = closestPointOnSegment(projected, c, a);
+
+            const d1 = projected.distanceTo(pa);
+            const d2 = projected.distanceTo(pb);
+            const d3 = projected.distanceTo(pc);
+
+            let closest;
+            if (d1 <= d2 && d1 <= d3) {
+                closest = pa;
+            } else if (d2 <= d1 && d2 <= d3) {
+                closest = pb;
+            } else {
+                closest = pc;
+            }
+
+            [u, v, w] = barycentric(closest, a, b, c);
+
+            if (!isFinite(u) || !isFinite(v) || !isFinite(w)) {
+                return [1, 0, 0];
+            }
+
+            return [
+                THREE.MathUtils.clamp(u, 0, 1),
+                THREE.MathUtils.clamp(v, 0, 1),
+                THREE.MathUtils.clamp(w, 0, 1)
+            ];
+        }
+
+
         // --- Helper function to make materials self-illuminating ---
         // This ensures the material's color/texture is rendered directly without strong light influence.
         function makeMaterialSelfIlluminating(material) {
@@ -146,6 +240,36 @@
             cameraInstance.updateMatrixWorld();
         }
 
+        function updateIntrinsic(cameraInstance, intrinsic, canvasWidth, canvasHeight) {
+            const fx = intrinsic[0][0];
+            const fy = intrinsic[1][1];
+            // The original cx, cy from the intrinsic matrix:
+            const cx = intrinsic[0][2];
+            const cy = intrinsic[1][2];
+
+            // To visually center the camera output, we'll effectively use the center of the canvas
+            // as the principal point for the projection matrix, ignoring the intrinsic's cx, cy for this.
+            // This means the optical axis is aligned with the center of the rendered viewport.
+            const centeredCx = canvasWidth / 2;
+            const centeredCy = canvasHeight / 2;
+
+            const near = 0.1;
+            const far = 1000;
+
+            const P = new THREE.Matrix4();
+            // Projection matrix elements are calculated using fx, fy from intrinsic
+            // but the translation terms (the last column before 0, 1) are set
+            // to center the projection on the canvas.
+            P.set(
+                2 * fx / canvasWidth,   0,                          1 - (2 * centeredCx / canvasWidth),   0,
+                0,                     (2 * fy / canvasHeight),   (2 * centeredCy / canvasHeight)  - 1,  0,
+                0,                     0,                          -(far + near) / (far - near), -(2 * far * near) / (far - near),
+                0,                     0,                          -1,                           0
+            );
+            cameraInstance.projectionMatrix.copy(P);
+            cameraInstance.projectionMatrixInverse.copy(P).invert();
+        }
+
         // Function to extract position from extrinsic matrix (for GLB placement)
         function getPositionFromExtrinsic(extrinsic) {
             const R_extrinsic = new THREE.Matrix3();
@@ -176,7 +300,7 @@
 
             const modelsWithDistances = loadedModels.map(item => {
                 const distance = cameraPosition.distanceTo(item.modelWorldPosition);
-                return { model: item.model, distance: distance, glb_id: item.glb_id };
+                return { model: item.model, distance: distance, glb_id: item.glb_id, originalIntrinsic: item.originalIntrinsic, modelWorldPosition: item.modelWorldPosition };
             });
 
             
@@ -184,9 +308,11 @@
             modelsWithDistances.sort((a, b) => a.distance - b.distance);
             const closestThree = modelsWithDistances.slice(0, 3);
 
-            let totalInverseDistance = 0;
+            let totalInverseDistance = 0.0;
+            let totalDistnance = 0.0;
             closestThree.forEach(item => {
                 totalInverseDistance += 1 / (item.distance + 0.001);
+                totalDistnance += Math.max(item.distance, 0.001)
             });
 
             loadedModels.forEach(item => {
@@ -200,17 +326,61 @@
             });
 
             if(false){
-                closestThree.forEach(item => {
-                    const weight = (1 / (item.distance + 0.001)) / totalInverseDistance;
+                // calculate barycentric weights for the closest three models
+                // let bary_weights = getBarycentricWeights(
+                //     cameraPosition,
+                //     closestThree[0].modelWorldPosition,
+                //     closestThree[1].modelWorldPosition,
+                //     closestThree[2].modelWorldPosition
+                // );
+                let interpolate_intrinsic = [
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    [0, 0, 0]
+                ];    
+                let opacitys = [];
+                let weights = []
+                
+                
+                // closestThree.forEach((item, idx) => {
+                //     let weight = (1 / (item.distance + 0.001)) / totalInverseDistance;
+                //     weights.push(weight);
+                // });
+                weights = getBarycentricWeights(
+                    cameraPosition,
+                    closestThree[0].modelWorldPosition,
+                    closestThree[1].modelWorldPosition,
+                    closestThree[2].modelWorldPosition
+                );
+                opacitys.push(weights[0]);
+                opacitys.push(weights[1] / (1 - opacitys[0] + 1e-10));
+                opacitys.push(weights[2] / ((1 - opacitys[0]) * (1 - opacitys[1])) + 1e-10);
+
+
+                closestThree.forEach((item, idx) => {
+                    let weight = weights[idx];
+                    //let weight = (1 / (item.distance + 0.001)) / totalInverseDistance;
+                    //let weight = 1.0 - (Math.max(item.distance, 0.001) / totalDistnance);
+                    //let weight = bary_weights[idx];
                     item.model.traverse((child) => {
                         if (child.isMesh) {
-                            child.material.opacity = weight;
+                            child.material.opacity = opacitys[idx];
                             child.material.visible = true;
+                            child.material.side = THREE.DoubleSide; // Ensure double-sided rendering
+                            child.material.depthWrite = false; // Disable depth writing for transparency
                             child.material.needsUpdate = true;
                         }
                     });
+                    for(var i = 0; i < 3; i++){
+                        for(var j = 0; j < 3; j++){
+                            interpolate_intrinsic[i][j] += item.originalIntrinsic[i][j] * weight;
+                        }
+                    }
                 });
                 write_camera_location(closestThree.map(item => item.glb_id));
+                // update camera intrinsic
+
+                //updateIntrinsic(camera, interpolate_intrinsic, canvas.width, canvas.height);
             } else{                 
                 // show only the closest model
                 closestThree.slice(0, 1).forEach(item => {
@@ -222,8 +392,9 @@
                             child.material.needsUpdate = true;
                         }
                     });
+                    let render_canvas = renderer.domElement;
+                    updateIntrinsic(camera, item.originalIntrinsic, render_canvas.width, render_canvas.height);
                 });
-                console.log("Closest model ID:", closestThree.slice(0, 1).map(item => item.glb_id));
                 write_camera_location(closestThree.slice(0, 1).map(item => item.glb_id));
             }
         }
@@ -244,6 +415,8 @@
 
             const canvas = document.getElementById('threejs-canvas');
             const loadingOverlay = document.getElementById('loading-overlay');
+
+
 
             // --- Load JSON data from file ---
             try {
@@ -327,15 +500,14 @@
                     model.traverse((child) => {
                         if (child.isMesh) {
                             child.material.side = THREE.DoubleSide; // or THREE.FrontSide / THREE.BackSide
+                            child.transparent = true;
+                            child.depthWrite = false; // Disable depth writing for transparency
                             child.material.needsUpdate = true;
                         }
                     });
 
 
                     const modelWorldPosition = getPositionFromExtrinsic(data.extrinsic);
-                    if(i == 0){
-                        console.log("Model World Position:", modelWorldPosition);
-                    }
                     //model.position.copy(modelWorldPosition);
 
                     //model.scale.set(0.5, 0.5, 0.5);
@@ -349,6 +521,7 @@
                         glb_id: i,
                         model: model,
                         originalExtrinsic: data.extrinsic,
+                        originalIntrinsic: data.intrinsic,
                         modelWorldPosition: modelWorldPosition
                     });
                     model.visible = true;
@@ -367,7 +540,6 @@
                 const firstEntry = jsonData[0];
                 setupCameraFromMatrices(camera, firstEntry.intrinsic, firstEntry.extrinsic, canvas.width, canvas.height);
                 //controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(10));
-                console.log("Camera position:", camera.position);
                 controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()));
                 controls.update();
             } else {
