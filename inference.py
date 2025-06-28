@@ -49,6 +49,9 @@ with torch.no_grad():
         depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
         output["depth_map"] = depth_map
         output["depth_conf"] = depth_conf
+        
+        # Predict Point Maps
+        point_map, point_conf = model.point_head(aggregated_tokens_list, images, ps_idx)
 
         print(f"Depth map shape: {depth_map.shape}, Depth confidence shape: {depth_conf.shape}")
          # Construct 3D Points from Depth Maps and Cameras
@@ -58,6 +61,7 @@ with torch.no_grad():
                                                                 intrinsic.squeeze(0))
         
         output["point_map_by_unprojection"] = torch.from_numpy(point_map_by_unprojection)
+        output["point_map"] = point_map
         # save point map
         point_map_path = os.path.join(OUPUT_DIR, OUTPUT_FILE)
         save_file(output, point_map_path)

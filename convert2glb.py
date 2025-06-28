@@ -28,7 +28,7 @@ def convert_obj_dir_to_glb_dir(input_dir, output_dir):
     skipped_count = 0
 
     # Iterate through all files in the input directory
-    for filename in os.listdir(input_dir):
+    for filename in sorted(os.listdir(input_dir)):
         if filename.lower().endswith('.obj'):
             obj_name = os.path.splitext(filename)[0] # Get base name without extension
             obj_path = os.path.join(input_dir, filename)
@@ -67,8 +67,8 @@ if __name__ == "__main__":
     # Example: If your obj/mtl files are in a 'input_models' folder
     # and you want to save GLB files to 'output_glbs' folder,
     # both relative to where your script is.
-    input_directory_name = '/pure/t1/project/vggt_bary/output/shiny_extended_1008/cake_obj' # <--- IMPORTANT: Change this to your input directory name
-    output_directory_name = '/pure/t1/project/vggt_bary/output/shiny_extended_1008/cake_glb' # <--- IMPORTANT: Change this to your desired output directory name
+    input_directory_name = '/pure/t1/project/vggt_bary/output/shiny_extended_1008/cake_obj_v3' # <--- IMPORTANT: Change this to your input directory name
+    output_directory_name = '/pure/t1/project/vggt_bary/output/shiny_extended_1008/cake_glb_v3' # <--- IMPORTANT: Change this to your desired output directory name
 
     # Construct the full paths for the directories
     input_dir_path = os.path.join(script_dir, input_directory_name)

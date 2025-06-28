@@ -71,9 +71,13 @@ def main():
     # print(f"Point map shape: {point_map.shape}")
     for image_id in tqdm(range(point_map.shape[0])):
         coords = point_map[image_id].cpu().numpy()
+        # change coordinate from OpenCV to OpenGL
+        coords[..., 1] = -coords[..., 1]  # flip Y axis
+        coords[..., 2] = -coords[..., 2]  # flip Z axis        
+
         # print(f"Coords shape: {coords.shape}")
         # Save as OBJ file
-        obj_filename = f"/pure/t1/project/vggt_bary/output/shiny_extended_1008/cake_obj/{image_id:02d}.obj"
+        obj_filename = f"/pure/t1/project/vggt_bary/output/shiny_extended_1008/cake_obj_v3/{image_id:02d}.obj"
         save_mesh_as_obj(coords, obj_filename, texture_filename=f"{image_id:02d}.png")
         print(f"Saved mesh to {obj_filename}")
 
